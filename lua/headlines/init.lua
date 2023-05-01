@@ -1,7 +1,7 @@
 local M = {}
 
-M.namespace = vim.api.nvim_create_namespace "headlines_namespace"
-local q = require "vim.treesitter.query"
+M.namespace = vim.api.nvim_create_namespace("headlines")
+M.augroup = vim.api.nvim_create_augroup("headlines", {})
 
 local parse_query_save = function(language, query)
     -- vim.treesitter.query.parse_query() is deprecated, use vim.treesitter.query.parse() instead
@@ -18,45 +18,54 @@ M.config = {
         query = parse_query_save(
             "markdown",
             [[
-                (atx_heading [
-                    (atx_h1_marker)
-                    (atx_h2_marker)
-                    (atx_h3_marker)
-                    (atx_h4_marker)
-                    (atx_h5_marker)
-                    (atx_h6_marker)
-                ] @headline)
+                (atx_heading) @headline
 
                 (thematic_break) @dash
 
                 (fenced_code_block) @codeblock
+
+                (list
+                    (list_item) @listitem
+                ) @list
 
                 (block_quote_marker) @quote
                 (block_quote (paragraph (inline (block_continuation) @quote)))
             ]]
         ),
         headline_highlights = { "Headline" },
-        codeblock_highlight = "CodeBlock",
+        captures = {
+            headline = {
+                highlights = { "Headline" },
+                min_width = 80,
+                capture_name = 'headline',
+                border_size = { 1, 1, 1, 1 },
+                border = { "▃", "x", "▍", "x", "🬂", "x", "🮈", "x" },
+                invert_border_hl = true,
+                dynamic_border = true,
+            },
+            codeblock = {
+                highlight = "CodeBlock",
+                min_width = 80,
+                capture_name = 'codeblock',
+                dynamic_border = true,
+            },
+            list = {
+                highlight = "CodeBlock",
+                min_width = 80,
+                capture_name = 'list',
+                dynamic_border = true,
+            },
+        },
         dash_highlight = "Dash",
         dash_string = "-",
         quote_highlight = "Quote",
         quote_string = "┃",
-        fat_headlines = true,
-        fat_headline_upper_string = "▃",
-        fat_headline_lower_string = "🬂",
     },
     rmd = {
         query = parse_query_save(
             "markdown",
             [[
-                (atx_heading [
-                    (atx_h1_marker)
-                    (atx_h2_marker)
-                    (atx_h3_marker)
-                    (atx_h4_marker)
-                    (atx_h5_marker)
-                    (atx_h6_marker)
-                ] @headline)
+                (atx_heading) @headline
 
                 (thematic_break) @dash
 
@@ -179,29 +188,27 @@ M.setup = function(config)
         end
     end
 
-    vim.cmd [[
-        highlight default link Headline ColorColumn
-        highlight default link CodeBlock ColorColumn
-        highlight default link Dash LineNr
-        highlight default link DoubleDash LineNr
-        highlight default link Quote LineNr
-    ]]
-
-    vim.cmd [[
-        augroup Headlines
-        autocmd FileChangedShellPost,Syntax,TextChanged,InsertLeave,WinScrolled * lua require('headlines').refresh()
-        augroup END
-    ]]
+    vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
+        group = M.augroup,
+        callback = function(ev)
+            M.refresh(ev.buf)
+        end
+    })
+    vim.api.nvim_set_decoration_provider(M.namespace, {
+        on_buf = function(_, bufnr)
+            M.refresh(bufnr)
+        end
+    })
 end
 
 local nvim_buf_set_extmark = function(...)
     pcall(vim.api.nvim_buf_set_extmark, ...)
 end
 
-M.refresh = function()
+M.refresh = function(bufnr)
+    bufnr = bufnr or vim.api.nvim_get_current_buf()
     local c = M.config[vim.bo.filetype]
-    local bufnr = vim.api.nvim_get_current_buf()
-    vim.api.nvim_buf_clear_namespace(0, M.namespace, 0, -1)
+    vim.api.nvim_buf_clear_namespace(bufnr, M.namespace, 0, -1)
 
     if not c or not c.query then
         return
@@ -214,7 +221,6 @@ M.refresh = function()
     local win_view = vim.fn.winsaveview()
     local left_offset = win_view.leftcol
     local width = vim.api.nvim_win_get_width(0)
-    local last_fat_headline = -1
 
     for _, match, metadata in c.query:iter_matches(root, bufnr) do
         for id, node in pairs(match) do
@@ -222,90 +228,147 @@ M.refresh = function()
             local start_row, start_column, end_row, _ =
                 unpack(vim.tbl_extend("force", { node:range() }, (metadata[id] or {}).range or {}))
 
-            if capture == "headline" and c.headline_highlights then
-                -- vim.treesitter.query.get_node_text() is deprecated, use vim.treesitter.get_node_text() instead.
-                local get_text_function = vim.treesitter.get_node_text(node, bufnr) or q.get_node_text(node, bufnr)
-                local level = #vim.trim(get_text_function)
-                local hl_group = c.headline_highlights[math.min(level, #c.headline_highlights)]
-                nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
-                    end_col = 0,
-                    end_row = start_row + 1,
-                    hl_group = hl_group,
-                    hl_eol = true,
-                })
-
-                if c.fat_headlines then
-                    local reverse_hl_group = M.make_reverse_highlight(hl_group)
-
-                    local padding_above = { { c.fat_headline_upper_string:rep(width), reverse_hl_group } }
-                    if start_row > 0 then
-                        local line_above = vim.api.nvim_buf_get_lines(bufnr, start_row - 1, start_row, false)[1]
-                        if line_above == "" and start_row - 1 ~= last_fat_headline then
-                            nvim_buf_set_extmark(bufnr, M.namespace, start_row - 1, 0, {
-                                virt_text = padding_above,
-                                virt_text_pos = "overlay",
-                                hl_mode = "combine",
-                            })
-                        else
-                            nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
-                                virt_lines_above = true,
-                                virt_lines = { padding_above },
-                            })
-                        end
-                    end
-
-                    local padding_below = { { c.fat_headline_lower_string:rep(width), reverse_hl_group } }
-                    local line_below = vim.api.nvim_buf_get_lines(bufnr, start_row + 1, start_row + 2, false)[1]
-                    if line_below == "" then
-                        nvim_buf_set_extmark(bufnr, M.namespace, start_row + 1, 0, {
-                            virt_text = padding_below,
-                            virt_text_pos = "overlay",
-                            hl_mode = "combine",
-                        })
-                        last_fat_headline = start_row + 1
-                    else
-                        nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
-                            virt_lines = { padding_below },
-                        })
-                    end
-                end
-            end
-
-            if capture == "dash" and c.dash_highlight and c.dash_string then
-                nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
-                    virt_text = { { c.dash_string:rep(width), c.dash_highlight } },
-                    virt_text_pos = "overlay",
-                    hl_mode = "combine",
-                })
-            end
-
+--            if capture == "dash" and c.dash_highlight and c.dash_string then
+--                nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
+--                    virt_text = { { c.dash_string:rep(width), c.dash_highlight } },
+--                    virt_text_pos = "overlay",
+--                    hl_mode = "combine",
+--                })
             if capture == "doubledash" and c.doubledash_highlight and c.doubledash_string then
                 nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
                     virt_text = { { c.doubledash_string:rep(width), c.doubledash_highlight } },
                     virt_text_pos = "overlay",
                     hl_mode = "combine",
                 })
-            end
+            else
+                for _, opts in pairs(c.captures) do
+                    if opts.capture_name == capture then
+                        -- use single highlight or select relevant level
+                        local hl_group =
+                            (opts.get_block_hl and opts:get_block_hl(node))
+                            or (type(opts.highlights) == 'table' and opts.highlights[1])
+                            or opts.highlights
+                        if type(hl_group) == 'string' and vim.fn.hlexists(hl_group) == 0 then
+                            error('highlight group not found')
+                        elseif type(hl_group) == 'table' then
+                            local hlg_name, hlg_cfg = hl_group[1], hl_group[2]
+                            if vim.fn.hlexists(hlg_name) == 0 then
+                                vim.api.nvim_set_hl(0, hlg_name, hlg_cfg)
+                            end
+                            hl_group = hlg_name
+                        end
+                        if hl_group then
+                            -- init border highlight group
+                            local border_hl_group = opts.invert_border_hl and M.make_reverse_highlight(hl_group) or
+                            hl_group
+                            -- get lines
+                            local lines = vim.api.nvim_buf_get_lines(bufnr, start_row, end_row, false)
+                            -- get indent on first line
+                            local _, l_padding = lines[1]:find "^ +"
+                            l_padding = math.max((l_padding or 0) - left_offset, 0)
+                            -- apply highlight to ext
+                            nvim_buf_set_extmark(bufnr, M.namespace, start_row, l_padding, {
+                                strict = false,
+                                end_row = end_row,
+                                hl_group = hl_group,
+                                hl_mode = "combine",
+                            })
 
-            if capture == "codeblock" and c.codeblock_highlight then
-                nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
-                    end_col = 0,
-                    end_row = end_row,
-                    hl_group = c.codeblock_highlight,
-                    hl_eol = true,
-                })
+                            -- calculate block width
+                            local highlight_cols = opts.min_width
+                            -- get longest line (if longer than min width)
+                            for _, line in pairs(lines) do
+                                if #line > highlight_cols then highlight_cols = #line end
+                            end
+                            if opts.min_width ~= -1 then
+                                -- pad lines with virt_text
+                                for i, line in pairs(lines) do
+                                    local virt_text = { { string.rep(" ", highlight_cols - #line), hl_group } }
+                                    if opts.border and opts.border[3] then
+                                        virt_text[#virt_text + 1] = { opts.border[3], border_hl_group }
+                                    end
+                                    nvim_buf_set_extmark(bufnr, M.namespace, start_row + i - 1, #line, {
+                                        strict = false,
+                                        virt_text = virt_text,
+                                        virt_text_win_col = #line
+                                    })
+                                    if #line > highlight_cols then highlight_cols = #line end
+                                end
+                            end
+                            if opts.border then
+                                -- set top border
+                                local top_border = { {
+                                    opts.border[1]:rep(
+                                        highlight_cols + vim.str_utfindex(opts.border[3]) - 1
+                                    ), border_hl_group
+                                } }
+                                -- set top right corner border
+                                if opts.border[2] then
+                                    top_border[#top_border + 1] = {
+                                        opts.border[2],
+                                        border_hl_group
+                                    }
+                                end
+                                -- FIX: doesn't account for columns
+                                local existing_marks = vim.api.nvim_buf_get_extmarks(
+                                    bufnr, M.namespace,
+                                    { start_row - 1, 0 }, { start_row - 1, -1 },
+                                    { details = true }
+                                )
+                                local above_marked = false
+                                for _, mark in pairs(existing_marks) do
+                                    if mark[4].virt_text or mark[4].virt_lines then
+                                        above_marked = true
+                                    end
+                                end
+                                local line_above = vim.api.nvim_buf_get_lines(bufnr, start_row - 1, start_row, false)[1]
+                                if line_above ~= "" or above_marked or (not opts.dynamic_border) then
+                                    nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
+                                        virt_lines_above = true,
+                                        virt_lines = { top_border },
+                                    })
+                                else
+                                    nvim_buf_set_extmark(bufnr, M.namespace, start_row - 1, 0, {
+                                        virt_text_pos = 'overlay',
+                                        strict = false,
+                                        virt_text = top_border,
+                                        hl_mode = "combine",
+                                    })
+                                end
 
-                local start_line = vim.api.nvim_buf_get_lines(bufnr, start_row, start_row + 1, false)[1]
-                local _, padding = start_line:find "^ +"
-                local codeblock_padding = math.max((padding or 0) - left_offset, 0)
+                                -- set bottom border
+                                local bot_border = { {
+                                    opts.border[5]:rep(
+                                        highlight_cols + vim.str_utfindex(opts.border[3]) - 1
+                                    ), border_hl_group
+                                } }
+                                -- set bottom right corner border
+                                if #opts.border[3] >= 1 then
+                                    bot_border[#bot_border + 1] = {
+                                        opts.border[4],
+                                        border_hl_group
+                                    }
+                                end
 
-                if codeblock_padding > 0 then
-                    for i = start_row, end_row do
-                        nvim_buf_set_extmark(bufnr, M.namespace, i, 0, {
-                            virt_text = { { string.rep(" ", codeblock_padding), "Normal" } },
-                            virt_text_win_col = 0,
-                            priority = 1,
-                        })
+                                local bot_mark_opts = {}
+                                local mark_row = end_row
+                                local line_below = vim.api.nvim_buf_get_lines(bufnr, end_row, end_row + 1, false)[1]
+                                if line_below ~= "" or (not opts.dynamic_border) then
+                                    mark_row = mark_row - 1
+                                    bot_mark_opts.virt_lines = { bot_border }
+                                else
+                                    bot_mark_opts = {
+                                        virt_text_pos = 'overlay',
+                                        strict = false,
+                                        virt_text = bot_border,
+                                        hl_mode = "combine",
+                                    }
+                                end
+                                vim.api.nvim_buf_set_extmark(bufnr, M.namespace, mark_row, 0, bot_mark_opts)
+                            end
+                            _ = opts.misc_fmt and opts:misc_fmt(node, bufnr, M.namespace)
+                            break
+                        end
                     end
                 end
             end
