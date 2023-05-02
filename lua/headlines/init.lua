@@ -228,12 +228,12 @@ M.refresh = function(bufnr)
             local start_row, start_column, end_row, _ =
                 unpack(vim.tbl_extend("force", { node:range() }, (metadata[id] or {}).range or {}))
 
---            if capture == "dash" and c.dash_highlight and c.dash_string then
---                nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
---                    virt_text = { { c.dash_string:rep(width), c.dash_highlight } },
---                    virt_text_pos = "overlay",
---                    hl_mode = "combine",
---                })
+            --            if capture == "dash" and c.dash_highlight and c.dash_string then
+            --                nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
+            --                    virt_text = { { c.dash_string:rep(width), c.dash_highlight } },
+            --                    virt_text_pos = "overlay",
+            --                    hl_mode = "combine",
+            --                })
             if capture == "doubledash" and c.doubledash_highlight and c.doubledash_string then
                 nvim_buf_set_extmark(bufnr, M.namespace, start_row, 0, {
                     virt_text = { { c.doubledash_string:rep(width), c.doubledash_highlight } },
@@ -258,9 +258,10 @@ M.refresh = function(bufnr)
                             hl_group = hlg_name
                         end
                         if hl_group then
+                            local trim_bot = opts.trim_bot_count and opts:trim_bot_count(node, bufnr) or 0
                             -- init border highlight group
                             local border_hl_group = opts.invert_border_hl and M.make_reverse_highlight(hl_group) or
-                            hl_group
+                                hl_group
                             -- get lines
                             local lines = vim.api.nvim_buf_get_lines(bufnr, start_row, end_row, false)
                             -- get indent on first line
@@ -269,7 +270,7 @@ M.refresh = function(bufnr)
                             -- apply highlight to ext
                             nvim_buf_set_extmark(bufnr, M.namespace, start_row, l_padding, {
                                 strict = false,
-                                end_row = end_row,
+                                end_row = end_row-trim_bot,
                                 hl_group = hl_group,
                                 hl_mode = "combine",
                             })
@@ -278,21 +279,23 @@ M.refresh = function(bufnr)
                             local highlight_cols = opts.min_width
                             -- get longest line (if longer than min width)
                             for _, line in pairs(lines) do
-                                if #line > highlight_cols then highlight_cols = #line end
+                                local r_pad = opts.r_pad or 0
+                                if #line + r_pad > highlight_cols then highlight_cols = #line + r_pad end
                             end
                             if opts.min_width ~= -1 then
                                 -- pad lines with virt_text
                                 for i, line in pairs(lines) do
-                                    local virt_text = { { string.rep(" ", highlight_cols - #line), hl_group } }
-                                    if opts.border and opts.border[3] then
-                                        virt_text[#virt_text + 1] = { opts.border[3], border_hl_group }
+                                    if i + trim_bot <= #lines then
+                                        local virt_text = { { string.rep(" ", highlight_cols - #line), hl_group } }
+                                        if opts.border and opts.border[3] then
+                                            virt_text[#virt_text + 1] = { opts.border[3], border_hl_group }
+                                        end
+                                        nvim_buf_set_extmark(bufnr, M.namespace, start_row + i - 1, #line, {
+                                            strict = false,
+                                            virt_text = virt_text,
+                                            virt_text_win_col = #line
+                                        })
                                     end
-                                    nvim_buf_set_extmark(bufnr, M.namespace, start_row + i - 1, #line, {
-                                        strict = false,
-                                        virt_text = virt_text,
-                                        virt_text_win_col = #line
-                                    })
-                                    if #line > highlight_cols then highlight_cols = #line end
                                 end
                             end
                             if opts.border then
@@ -351,9 +354,9 @@ M.refresh = function(bufnr)
                                 end
 
                                 local bot_mark_opts = {}
-                                local mark_row = end_row
+                                local mark_row = end_row - trim_bot
                                 local line_below = vim.api.nvim_buf_get_lines(bufnr, end_row, end_row + 1, false)[1]
-                                if line_below ~= "" or (not opts.dynamic_border) then
+                                if line_below ~= "" or (not opts.dynamic_border) or trim_bot == 0 then
                                     mark_row = mark_row - 1
                                     bot_mark_opts.virt_lines = { bot_border }
                                 else
@@ -366,7 +369,10 @@ M.refresh = function(bufnr)
                                 end
                                 vim.api.nvim_buf_set_extmark(bufnr, M.namespace, mark_row, 0, bot_mark_opts)
                             end
-                            _ = opts.misc_fmt and opts:misc_fmt(node, bufnr, M.namespace)
+                            _ = opts.misc_fmt and opts:misc_fmt(
+                                node, bufnr, M.namespace,
+                                highlight_cols, hl_group, border_hl_group
+                            )
                             break
                         end
                     end
